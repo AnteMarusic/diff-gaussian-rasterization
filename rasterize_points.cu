@@ -20,9 +20,87 @@
 #include <memory>
 #include "cuda_rasterizer/config.h"
 #include "cuda_rasterizer/rasterizer.h"
+#include "cuda_rasterizer/rasterizer_impl.h"
 #include <fstream>
 #include <string>
 #include <functional>
+
+// Method to get the intermediate data obtained during the rasterization process
+// Used for debugging and development purposes
+// P is the number of points (number of gaussians)
+// geomBuffer is the collected buffer that is returned by the render method
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+ExportIntermediateDataCUDA(
+    int P,
+    const torch::Tensor& geomBuffer)
+{
+    // Create CPU tensors to hold the data
+    torch::TensorOptions options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+    torch::Tensor means2D_cpu = torch::empty({P, 2}, options);
+    torch::Tensor conic_opacity_cpu = torch::empty({P, 4}, options);
+    torch::Tensor rgb_cpu = torch::empty({P, 3}, options);
+    torch::Tensor depths_cpu = torch::empty({P}, options);
+    
+    std::cout << "ExportIntermediateDataCUDA called with P=" << P << std::endl;
+    
+    // Early return if no points
+    if (P <= 0 || geomBuffer.size(0) == 0) {
+        std::cout << "No points to export or empty geom buffer" << std::endl;
+        return std::make_tuple(means2D_cpu, conic_opacity_cpu, rgb_cpu, depths_cpu);
+    }
+    
+    try {
+        // Reconstruct geometry state from the buffer
+        char* buffer_ptr = reinterpret_cast<char*>(geomBuffer.data_ptr());
+        CudaRasterizer::GeometryState geomState = CudaRasterizer::GeometryState::fromChunk(buffer_ptr, P);
+        
+        // Copy data from GPU to CPU
+        cudaError_t err;
+        
+        // Copy means2D (float2 array)
+        err = cudaMemcpy(means2D_cpu.data_ptr<float>(), 
+                         geomState.means2D, 
+                         P * sizeof(float2), 
+                         cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error copying means2D: " << cudaGetErrorString(err) << std::endl;
+        }
+        
+        // Copy conic_opacity (float4 array)
+        err = cudaMemcpy(conic_opacity_cpu.data_ptr<float>(), 
+                         geomState.conic_opacity, 
+                         P * sizeof(float4), 
+                         cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error copying conic_opacity: " << cudaGetErrorString(err) << std::endl;
+        }
+        
+        // Copy RGB values (float* array, contiguously stored)
+        err = cudaMemcpy(rgb_cpu.data_ptr<float>(), 
+                         geomState.rgb, 
+                         P * 3 * sizeof(float), 
+                         cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error copying rgb: " << cudaGetErrorString(err) << std::endl;
+        }
+        
+        // Copy depths (float* array)
+        err = cudaMemcpy(depths_cpu.data_ptr<float>(), 
+                         geomState.depths, 
+                         P * sizeof(float), 
+                         cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error copying depths: " << cudaGetErrorString(err) << std::endl;
+        }
+        
+        std::cout << "Data successfully copied from GPU to CPU" << std::endl;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "Error exporting data: " << e.what() << std::endl;
+    }
+    
+    return std::make_tuple(means2D_cpu, conic_opacity_cpu, rgb_cpu, depths_cpu);
+}
 
 std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     auto lambda = [&t](size_t N) {
